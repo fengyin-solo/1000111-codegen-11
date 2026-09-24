@@ -7,7 +7,19 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记追溯记录</button>
-        <button class="btn" type="button" @click="exportRows">导出批次追溯清单</button>
+        <button class="btn" type="button" :disabled="exporting" @click="exportRows">
+          {{ exporting ? '正在生成…' : '下载追溯码清单' }}
+        </button>
+        <button class="btn" type="button" :disabled="importing" @click="triggerImport">
+          {{ importing ? '正在导入…' : '导入追溯码清单' }}
+        </button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".csv,text/csv"
+          hidden
+          @change="onFilePicked"
+        />
       </div>
     </header>
 
@@ -17,6 +29,10 @@
         <strong class="stat-value">{{ item.value }}</strong>
       </article>
     </div>
+
+    <p v-if="importHint" class="import-hint">
+      清单需包含「追溯码、生产批次、上游供应商、全程温度区间」四列；导入按追溯码补齐缺失的上游供应商，重复追溯码只更新不新增。
+    </p>
 
     <form class="filter-bar" @submit.prevent="reload">
       <label v-for="field in filterFields" :key="field" class="filter-item">
@@ -50,14 +66,17 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无批次追溯数据，可先登记追溯记录</td>
+          <td :colspan="columns.length + 1" class="empty-state">
+            当前过滤条件下暂无批次追溯记录，可调整筛选条件后重试，或先登记追溯记录
+          </td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条批次追溯记录</span>
-      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+      <span v-if="successMessage" class="success-text">{{ successMessage }}</span>
+      <span v-else-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
@@ -74,20 +93,113 @@ const columns = ["追溯码", "货物名称", "生产批次", "上游供应商",
 const actions = ["关联上游", "发布追溯", "撤回追溯"]
 const statuses = ["待关联", "已关联", "已发布", "已撤回"]
 const stats = [{"label": "追溯码总量", "value": 0}, {"label": "待关联追溯", "value": 0}, {"label": "已发布追溯", "value": 0}]
+const importHint = true
+
+// 页面列名到后端查询参数的映射，保证列表过滤与清单下载用的是同一套条件
+const FILTER_PARAMS: Record<string, string> = {
+  追溯码: 'keyword',
+  货物名称: 'goods',
+  生产批次: 'batch',
+}
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const successMessage = ref('')
+const exporting = ref(false)
+const importing = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filterFields = Object.keys(FILTER_PARAMS)
+
+function buildQuery() {
+  const params = new URLSearchParams()
+  for (const [field, param] of Object.entries(FILTER_PARAMS)) {
+    const value = filters.value[field]?.trim()
+    if (value) {
+      params.set(param, value)
+    }
+  }
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
 
 function resetFilters() {
   filters.value = {}
   void reload()
 }
 
-function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+async function exportRows() {
+  errorMessage.value = ''
+  successMessage.value = ''
+  if (!total.value) {
+    errorMessage.value = '当前过滤条件下没有可下载的追溯记录，请先调整筛选条件'
+    return
+  }
+  exporting.value = true
+  try {
+    const response = await request(`${ENDPOINT}/export${buildQuery()}`)
+    if (!response.ok) {
+      throw new Error(await readErrorDetail(response, '清单生成失败，请稍后重试'))
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = '追溯码清单.csv'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+    successMessage.value = `已按当前过滤条件导出 ${total.value} 条追溯记录`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '清单下载失败'
+  } finally {
+    exporting.value = false
+  }
+}
+
+function triggerImport() {
+  errorMessage.value = ''
+  successMessage.value = ''
+  fileInput.value?.click()
+}
+
+async function onFilePicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''  // 允许重复选择同一个文件再次导入
+  if (!file) {
+    return
+  }
+  importing.value = true
+  try {
+    const content = await file.text()
+    const response = await request(`${ENDPOINT}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv; charset=utf-8' },
+      body: content,
+    })
+    if (!response.ok) {
+      throw new Error(await readErrorDetail(response, '清单导入失败，请检查文件后重试'))
+    }
+    const payload = (await response.json()) as { message?: string }
+    successMessage.value = payload.message ?? '清单导入完成'
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '清单导入失败'
+  } finally {
+    importing.value = false
+  }
+}
+
+async function readErrorDetail(response: Response, fallback: string) {
+  try {
+    const payload = (await response.json()) as { detail?: string }
+    return payload.detail || fallback
+  } catch {
+    return fallback
+  }
 }
 
 function openCreate() {
@@ -96,6 +208,7 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  successMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
@@ -112,9 +225,9 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  successMessage.value = ''
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${buildQuery()}`)
     if (!response.ok) {
       throw new Error('追溯记录列表读取失败')
     }

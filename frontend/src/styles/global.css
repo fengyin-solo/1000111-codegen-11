@@ -33,3 +33,6 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .link { border: none; background: none; color: var(--brand); cursor: pointer; padding: 0; }
 .page-foot { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .error-text { color: #b42318; }
+.success-text { color: #067647; }
+.import-hint { margin: 4px 0 12px; font-size: 12px; color: var(--muted); }
+.btn:disabled { opacity: 0.6; cursor: not-allowed; }
