@@ -28,6 +28,13 @@ class EntryPayload(BaseModel):
     remark: str | None = None
 
 
+class ImportPayload(BaseModel):
+    """清单文件再导入时提交的文件名与文本内容。"""
+
+    filename: str = ""
+    content: str = ""
+
+
 
 class OrderEntry(BaseModel):
     """冷链订单明细结构。"""

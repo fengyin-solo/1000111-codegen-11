@@ -7,7 +7,15 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记追溯记录</button>
-        <button class="btn" type="button" @click="exportRows">导出批次追溯清单</button>
+        <button class="btn" type="button" @click="exportRows">下载追溯码清单</button>
+        <button class="btn" type="button" @click="triggerImport">导入追溯码清单</button>
+        <input
+          ref="fileInput"
+          class="visually-hidden"
+          type="file"
+          accept=".csv,text/csv"
+          @change="handleImport"
+        />
       </div>
     </header>
 
@@ -50,20 +58,21 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无批次追溯数据，可先登记追溯记录</td>
+          <td :colspan="columns.length + 1" class="empty-state">{{ emptyText }}</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条批次追溯记录</span>
+      <span v-if="noticeMessage" class="ok-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
@@ -74,20 +83,93 @@ const columns = ["追溯码", "货物名称", "生产批次", "上游供应商",
 const actions = ["关联上游", "发布追溯", "撤回追溯"]
 const statuses = ["待关联", "已关联", "已发布", "已撤回"]
 const stats = [{"label": "追溯码总量", "value": 0}, {"label": "待关联追溯", "value": 0}, {"label": "已发布追溯", "value": 0}]
+// 过滤框与列表接口查询参数的对应关系，下载清单时复用同一套条件。
+const FILTER_PARAMS: Record<string, string> = { 追溯码: 'keyword', 货物名称: 'goods', 生产批次: 'batch' }
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+const hasActiveFilters = computed(() =>
+  Object.values(filters.value).some((value) => String(value ?? '').trim() !== ''),
+)
+const emptyText = computed(() =>
+  hasActiveFilters.value
+    ? '当前过滤条件下没有匹配的追溯记录，可调整条件后重新查询'
+    : '暂无批次追溯数据，可先登记追溯记录',
+)
+
+function buildQuery(): string {
+  const params = new URLSearchParams()
+  for (const [field, value] of Object.entries(filters.value)) {
+    const key = FILTER_PARAMS[field]
+    const keyword = String(value ?? '').trim()
+    if (key && keyword) {
+      params.set(key, keyword)
+    }
+  }
+  return params.toString()
+}
 
 function resetFilters() {
   filters.value = {}
   void reload()
 }
 
-function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+async function exportRows() {
+  errorMessage.value = ''
+  noticeMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/export?${buildQuery()}`)
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      throw new Error(payload?.detail ?? '追溯码清单生成失败，请稍后重试')
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = '追溯码清单.csv'
+    link.click()
+    URL.revokeObjectURL(url)
+    noticeMessage.value = '追溯码清单已下载，可填写上游供应商后重新导入'
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '追溯码清单下载失败'
+  }
+}
+
+function triggerImport() {
+  fileInput.value?.click()
+}
+
+async function handleImport(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) {
+    return
+  }
+  errorMessage.value = ''
+  noticeMessage.value = ''
+  try {
+    const content = await file.text()
+    const response = await request(`${ENDPOINT}/import`, {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, content }),
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.message ?? payload?.detail ?? '追溯码清单导入失败，请检查文件内容')
+    }
+    noticeMessage.value = String(payload.message)
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '追溯码清单导入失败'
+  }
 }
 
 function openCreate() {
@@ -112,9 +194,8 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${buildQuery()}`)
     if (!response.ok) {
       throw new Error('追溯记录列表读取失败')
     }

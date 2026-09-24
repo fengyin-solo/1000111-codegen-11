@@ -1,11 +1,9 @@
 """批次追溯接口：维护追溯记录，覆盖关联上游、发布追溯、撤回追溯等动作。"""
 from __future__ import annotations
 
-from typing import Any
+from fastapi import APIRouter, HTTPException, Query, Response
 
-from fastapi import APIRouter, HTTPException, Query
-
-from app.schemas import ActionResult, EntryPayload, PageResult
+from app.schemas import ActionResult, EntryPayload, ImportPayload, PageResult
 from app.services.trace import TraceService
 
 router = APIRouter(prefix="/api/trace", tags=["批次追溯"])
@@ -20,14 +18,43 @@ STATUSES = ["待关联", "已关联", "已发布", "已撤回"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按追溯码检索"),
     status: str | None = Query(default=None, description="待关联、已关联、已发布、已撤回"),
+    goods: str | None = Query(default=None, description="按货物名称检索"),
+    batch: str | None = Query(default=None, description="按生产批次检索"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
     """按追溯码与状态过滤批次追溯列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(keyword=keyword, status=status, goods=goods, batch=batch, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按追溯码检索"),
+    status: str | None = Query(default=None, description="待关联、已关联、已发布、已撤回"),
+    goods: str | None = Query(default=None, description="按货物名称检索"),
+    batch: str | None = Query(default=None, description="按生产批次检索"),
+) -> Response:
+    """下载追溯码清单：把当前过滤出的记录打包成 CSV，含追溯码、生产批次、上游供应商、全程温度区间。"""
+    content, total = service.build_manifest(keyword=keyword, status=status, goods=goods, batch=batch)
+    if total == 0:
+        raise HTTPException(status_code=404, detail="当前过滤条件下没有追溯记录，未生成追溯码清单")
+    return Response(
+        content=content.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="trace-code-manifest.csv"'},
+    )
+
+
+@router.post("/import", response_model=ActionResult)
+def import_entries(payload: ImportPayload) -> ActionResult:
+    """再导入追溯码清单：按追溯码补齐上游供应商，重复追溯码只更新不新增；缺必填列时说明原因并中止。"""
+    stats, message = service.import_manifest(payload.content)
+    if stats is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=stats)
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +83,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出批次追溯清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "trace", "total": total, "items": items}
